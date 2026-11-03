@@ -409,6 +409,31 @@ export default {
     }
 
     // ---- 引用 -------------------------------------------------------------
+    // 光标要停在引用块「下面那一行」，不是引用文本末尾 —— 所以不用 insertText
+    // （它会在调用前 trim 掉尾部换行），改成：读草稿 → 拼好带尾换行的全文 →
+    // setDraft。宿主画完草稿会把光标送到末尾，末尾正好是那个空行。
+    const placeCaretAtDraftEnd = () => {
+      const editor = document.querySelector('[data-slot="composer-rich-input"]')
+
+      if (!editor || !editor.isConnected) {
+        return
+      }
+
+      try {
+        const range = document.createRange()
+
+        range.selectNodeContents(editor)
+        range.collapse(false)
+
+        const sel = window.getSelection()
+
+        sel.removeAllRanges()
+        sel.addRange(range)
+      } catch {
+        // 编辑器结构不认识时就算了 —— 宿主的 placeCaretEnd 已经摆过一次
+      }
+    }
+
     const applyQuote = async item => {
       const body = quoteBody(item.text, item.turn)
 
@@ -416,12 +441,26 @@ export default {
         return
       }
 
-      const ok = await host.composer.insertText(null, body, { mode: 'block' })
+      const draft = await host.composer.getDraft(null)
+      const base = typeof draft === 'string' ? draft.replace(/\s+$/, '') : ''
+      // 结尾要两个换行：宿主把草稿画成「文本 + <br> 占位」，最后一个 <br> 只是
+      // 占位符，光标落在它后面打字仍会接回上一行；两个换行才真的空出一行。
+      const next = `${base ? `${base}\n\n` : ''}${body}\n\n`
+
+      const ok = await host.composer.setDraft(null, next)
 
       if (!ok) {
-        host.notify({ kind: 'error', message: '没有可写入的输入框' })
+        // 没有可写的输入框：退回「追加」这条路，至少别把引用丢了
+        const appended = await host.composer.insertText(null, body, { mode: 'block' })
 
-        return
+        if (!appended) {
+          host.notify({ kind: 'error', message: '没有可写入的输入框' })
+
+          return
+        }
+      } else {
+        // 宿主画完草稿才摆光标；等它一帧，再把光标钉到末尾那个空行上
+        window.requestAnimationFrame(() => window.requestAnimationFrame(placeCaretAtDraftEnd))
       }
 
       if (hl && item.range) {
